@@ -52,17 +52,56 @@ ensure_color('bg_color',    defaultConfig.bg_color)
 -- Swing tracking state
 ------------------------------------------------------------
 local swing = {
-    last_swing  = 0,
-    interval    = nil,
-    samples     = {},
-    cast_start  = 0,     -- os.clock() when a spell cast began (0 = not casting)
-    pause_frac  = 0,     -- arc fraction frozen at when a pause began
-    pause_until = 0,     -- os.clock() until which the arc is frozen (JA/WS/recovery lock)
-    was_engaged = nil,
+    last_swing    = 0,
+    interval      = nil,
+    samples       = {},
+    action_frozen = false, -- an action (cast/WS/JA/ranged charge) is in progress; arc held
+    pause_frac    = 0,     -- arc fraction captured when the freeze/pause began
+    pause_until   = 0,     -- os.clock() until which the arc is frozen (post-action lock)
+    freeze_safety = 0,     -- absolute backstop release time for an open-ended freeze
+    was_engaged   = nil,
 }
 
-local CAST_RECOVERY = 2.1   -- seconds after a cast before swings resume
-local ACTION_LOCK   = 1.0   -- seconds of animation lock after a WS / JA
+-- Post-action animation lock (seconds). Per Nerf's LSB analysis, auto-attack
+-- delay is frozen for the action's animation time AFTER the finish packet, then
+-- resumes from the same fraction. ~2.0s covers the vast majority of JA/WS/spell
+-- animations; the cast/charge portion itself is handled by freezing from the
+-- start packet until the finish packet arrives, so it needs no estimate.
+local DEFAULT_ANIM_LOCK = 2.0
+local PET_EXTRA_LOCK    = 1.0   -- extra buffer after pet-command (BST/SMN) finish
+local FREEZE_TIMEOUT    = 20.0  -- auto-release an open-ended freeze if finish packet never comes
+
+-- Resource-derived post-action lock. Units of CastTime/AnimationTime vary by
+-- Ashita build and are unverified here, so we clamp to a sane range and fall
+-- back to the 2.0s default. The freeze-until-finish already covers cast time,
+-- so this only needs the post-finish animation portion.
+local function anim_lock_from(res_obj)
+    local ok, lock = pcall(function()
+        if res_obj and res_obj.AnimationTime and res_obj.AnimationTime > 0 then
+            local s = res_obj.AnimationTime / 1000.0
+            if s >= 0.5 and s <= 6.0 then return s end
+        end
+        return DEFAULT_ANIM_LOCK
+    end)
+    return (ok and lock) or DEFAULT_ANIM_LOCK
+end
+
+local function get_ability_lock(id)
+    local ok, r = pcall(function() return AshitaCore:GetResourceManager():GetAbilityById(id) end)
+    return anim_lock_from(ok and r or nil)
+end
+
+local function get_spell_post_lock(id)
+    local ok, r = pcall(function() return AshitaCore:GetResourceManager():GetSpellById(id) end)
+    return anim_lock_from(ok and r or nil)
+end
+
+local function get_ws_lock(_id)
+    -- GetWeaponSkillById isn't reliably present across Ashita builds; default.
+    return DEFAULT_ANIM_LOCK
+end
+
+local debug_log = false   -- /na debug : print each self 0x28 action packet
 
 local show_config = false
 
@@ -167,36 +206,59 @@ local function record_swing()
             swing.interval = s / #swing.samples
         end
     end
-    swing.last_swing  = t_now
-    swing.cast_start  = 0
-    swing.pause_until = 0
-    swing.pause_frac  = 0
+    swing.last_swing    = t_now
+    swing.action_frozen = false
+    swing.pause_until   = 0
+    swing.pause_frac    = 0
 end
 
--- Freeze the arc now and schedule it to resume after `lock` seconds,
--- continuing from the frozen fraction (used for WS / JA / cast recovery).
-local function pause_and_resume(lock)
+-- Freeze the arc in place (open-ended) until a matching finish packet or the
+-- safety timeout. Used for WS/JA/ranged/spell START packets.
+local function freeze_now()
+    if not swing.action_frozen then
+        swing.pause_frac = current_frac()
+    end
+    swing.action_frozen = true
+    swing.freeze_safety = os.clock() + FREEZE_TIMEOUT
+end
+
+-- Apply a post-action animation lock and schedule resume from `frac` (defaults
+-- to the current live fraction for instant actions that have no start packet).
+local function pause_and_resume(lock, frac)
     local interval = swing.interval or get_main_weapon_delay()
-    local pf = current_frac()
-    swing.pause_frac  = pf
-    swing.pause_until = os.clock() + lock
+    local pf = frac or current_frac()
+    swing.pause_frac    = pf
+    swing.pause_until   = os.clock() + lock
+    swing.action_frozen = false
     if interval then
         -- last_swing placed so elapsed == pf*interval exactly when the lock ends
         swing.last_swing = swing.pause_until - pf * interval
     end
 end
 
+-- Action finished: continue from the frozen fraction if we were holding from a
+-- start packet, otherwise from the live fraction (instant WS/JA).
+local function finish_action(lock)
+    local frac = swing.action_frozen and swing.pause_frac or nil
+    pause_and_resume(lock, frac)
+end
+
 ------------------------------------------------------------
--- Packet handler: melee / WS / JA / cast detection + zone clear
+-- Packet handler: full 0x28 action-category coverage + zone clear
+--
+-- Auto-attack delay freezes while you perform another action and resumes from
+-- the same fraction once the action's animation lock ends. We freeze on START
+-- packets (held until the matching finish) and apply a post-action lock on
+-- FINISH packets. See AUTO_ATTACK_TIMING.md (Nerf) for the full rationale.
 ------------------------------------------------------------
 ashita.events.register('packet_in', 'nextauto_pkt_cb', function(e)
     if e.id == 0x000A or e.id == 0x000B then
-        swing.last_swing  = 0
-        swing.interval    = nil
-        swing.samples     = {}
-        swing.cast_start  = 0
-        swing.pause_until = 0
-        swing.pause_frac  = 0
+        swing.last_swing    = 0
+        swing.interval      = nil
+        swing.samples       = {}
+        swing.action_frozen = false
+        swing.pause_until   = 0
+        swing.pause_frac    = 0
         return
     end
     if e.id ~= 0x28 then return end
@@ -207,30 +269,50 @@ ashita.events.register('packet_in', 'nextauto_pkt_cb', function(e)
         local actor_id = ashita.bits.unpack_be(b, 40, 32)
         if actor_id ~= me then return end
         local category = ashita.bits.unpack_be(b, 82, 4)
+        local param    = ashita.bits.unpack_be(b, 86, 32)  -- action id (WS/JA/spell)
+
+        if debug_log then
+            print(string.format('[NextAuto] 0x28 cat=%d param=%d frac=%.2f%s',
+                category, param, current_frac(),
+                swing.action_frozen and ' (frozen)' or ''))
+        end
 
         if category == 1 then
-            -- Melee swing landed
+            -- Melee swing landed (clears any pause state).
             record_swing()
+        elseif category == 7 then
+            -- Weaponskill START: freeze until the finish packet.
+            freeze_now()
         elseif category == 3 then
-            -- Weaponskill: freeze through the animation lock, then resume
-            pause_and_resume(ACTION_LOCK)
+            -- Weaponskill FINISH: post-WS animation lock.
+            finish_action(get_ws_lock(param))
+        elseif category == 10 then
+            -- Job ability START (cast/ready time): freeze until finish.
+            freeze_now()
         elseif category == 6 then
-            -- Job ability: same animation-lock pause/resume
-            pause_and_resume(ACTION_LOCK)
+            -- Job ability FINISH: post-JA animation lock.
+            finish_action(get_ability_lock(param))
         elseif category == 8 then
-            -- Spell cast START: freeze indefinitely until cast finishes
-            swing.pause_frac = current_frac()
-            swing.cast_start = os.clock()
+            -- Spell cast START: freeze for the whole cast (held until finish).
+            freeze_now()
         elseif category == 4 then
-            -- Spell cast FINISH: resume from the frozen point after recovery
-            if swing.cast_start > 0 then
-                local interval = swing.interval or get_main_weapon_delay()
-                if interval then
-                    swing.last_swing  = os.clock() + CAST_RECOVERY - (swing.pause_frac * interval)
-                    swing.pause_until = os.clock() + CAST_RECOVERY
-                end
-                swing.cast_start = 0
-            end
+            -- Spell cast FINISH: post-cast animation lock.
+            finish_action(get_spell_post_lock(param))
+        elseif category == 12 then
+            -- Ranged START: freeze until the shot resolves.
+            freeze_now()
+        elseif category == 2 then
+            -- Ranged FINISH: post-shot animation lock.
+            finish_action(DEFAULT_ANIM_LOCK)
+        elseif category == 13 then
+            -- Pet ability finished: extra buffer (pet may animate past player lock).
+            finish_action(DEFAULT_ANIM_LOCK + PET_EXTRA_LOCK)
+        elseif category == 14 then
+            -- Dancer step: freeze + lock like a JA.
+            finish_action(DEFAULT_ANIM_LOCK)
+        elseif category == 15 then
+            -- RUN ward/effusion: freeze + lock like a JA.
+            finish_action(DEFAULT_ANIM_LOCK)
         end
     end)
 end)
@@ -304,14 +386,21 @@ ashita.events.register('d3d_present', 'nextauto_render_cb', function()
 
     local now = os.clock()
 
+    -- Safety: if an open-ended freeze never received its finish packet (e.g. a
+    -- spell interrupted by movement sends no 0x28 finish), release it so the arc
+    -- doesn't stay stuck forever.
+    if swing.action_frozen and now > swing.freeze_safety then
+        pause_and_resume(0, swing.pause_frac)
+    end
+
     -- Combat state + transitions (reset the round on engage/disengage).
     local engaged = is_engaged()
     if swing.was_engaged == nil then swing.was_engaged = engaged end
     if engaged ~= swing.was_engaged then
-        swing.last_swing  = 0
-        swing.cast_start  = 0
-        swing.pause_until = 0
-        swing.pause_frac  = 0
+        swing.last_swing    = 0
+        swing.action_frozen = false
+        swing.pause_until   = 0
+        swing.pause_frac    = 0
         if not engaged then swing.samples = {} end
         swing.was_engaged = engaged
     end
@@ -323,7 +412,7 @@ ashita.events.register('d3d_present', 'nextauto_render_cb', function()
     end
 
     -- Current fill fraction.
-    local casting = swing.cast_start > 0
+    local casting = swing.action_frozen
     local locked  = now < swing.pause_until
     local paused  = casting or locked or frozen_ooc
 
@@ -563,8 +652,11 @@ local function handle_command(args)
         config.segments = tonumber(args[3]) or config.segments;   print('[NextAuto] Smoothness = ' .. config.segments)
     elseif sub == 'curve' then
         config.curve = tonumber(args[3]) or config.curve;         print('[NextAuto] Curve = ' .. config.curve)
+    elseif sub == 'debug' then
+        debug_log = not debug_log
+        print('[NextAuto] Action-packet debug ' .. (debug_log and 'ON (watch the log)' or 'OFF'))
     else
-        print('[NextAuto] Usage: /nextauto [config|show|hide|lock|unlock|reset|length N|thickness N|segments N|curve F]')
+        print('[NextAuto] Usage: /nextauto [config|show|hide|lock|unlock|reset|length N|thickness N|segments N|curve F|debug]')
     end
     settings.save()
 end
