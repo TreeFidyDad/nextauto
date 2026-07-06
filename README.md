@@ -25,6 +25,8 @@ see at a glance how close you are to your next auto-attack.
 - **Pauses during weaponskills, job abilities, and spellcasts**, then resumes from
   where it left off
 - **MNK Martial Arts** support — proper H2H delay calculation with tier-based reduction
+- **Dual Wield** support — NIN/DNC (and `/NIN`, `/DNC`) attack-round timing from both
+  weapons and the Dual Wield trait
 - **Bare-hand detection** — works even with no weapon equipped on MNK
 
 ---
@@ -86,6 +88,11 @@ NextAuto monitors action packet `0x28` and builds a rolling average of your swin
 interval. It includes full MNK Martial Arts tier handling (levels 15/25/40/55/70) and
 the proper H2H delay formula (`480 + weapon_delay - MA_reduction`), so it works
 correctly for all jobs without any other addons.
+
+When you dual wield (NIN/DNC or a `/NIN`, `/DNC` subjob), the attack round is seeded
+from both weapons and the Dual Wield trait — `(main_delay + sub_delay) × (1 − DW%) ÷ 2`
+— instead of the main weapon alone, so the timer is close from the first swing and the
+rolling average then dials it in for haste.
 
 Weaponskills, job abilities, spellcasts, ranged attacks, pet commands, Dancer
 steps, and RUN actions freeze the timer for the duration of the action's

@@ -1,6 +1,6 @@
 addon.name    = 'nextauto'
 addon.author  = 'TreeFidyDad'
-addon.version = '2.0.2'
+addon.version = '2.0.3'
 addon.desc    = 'Configurable next-auto-attack swing timer (arc or bar) with color gradient.'
 addon.link    = 'https://github.com/TreeFidyDad/nextauto'
 
@@ -168,6 +168,56 @@ local function get_martial_arts_reduction()
     return (ok and r) or 0
 end
 
+------------------------------------------------------------
+-- Dual Wield (NIN / DNC main jobs and /NIN, /DNC subjobs)
+--
+-- With a real weapon in the offhand the attack-round interval is no longer just
+-- the main weapon's delay. Per BGWiki "Dual Wield":
+--     round delay = (D_main + D_sub) * (1 - DualWield%) / 2
+-- The Dual Wield trait % comes from job level (HorizonXI / 75-era tiers below);
+-- main vs. sub job take the higher tier (the trait does not stack). Gear/merit
+-- Dual Wield and Haste are intentionally left out -- this only seeds the estimate
+-- used before real swings are sampled; the rolling average still refines the live
+-- value to match actual haste and gear.
+------------------------------------------------------------
+local DUAL_WIELD_TRAITS = {
+    [13] = { { lvl = 45, dw = 0.25 }, { lvl = 25, dw = 0.15 }, { lvl = 10, dw = 0.10 } }, -- NIN
+    [19] = { { lvl = 60, dw = 0.25 }, { lvl = 40, dw = 0.15 }, { lvl = 20, dw = 0.10 } }, -- DNC
+}
+
+local function dw_for_job(job, level)
+    local tiers = DUAL_WIELD_TRAITS[job or 0]
+    if not tiers then return 0 end
+    for _, t in ipairs(tiers) do
+        if (level or 0) >= t.lvl then return t.dw end
+    end
+    return 0
+end
+
+local function get_dual_wield_pct()
+    local ok, dw = pcall(function()
+        local pl = AshitaCore:GetMemoryManager():GetPlayer()
+        return math.max(
+            dw_for_job(pl:GetMainJob(), pl:GetMainJobLevel()),
+            dw_for_job(pl:GetSubJob(),  pl:GetSubJobLevel()))
+    end)
+    return (ok and dw) or 0
+end
+
+-- Returns the item resource in an equipment slot only if it holds an actual
+-- weapon (a weapon skill type with a real delay), so a shield or grip in the sub
+-- slot is never mistaken for a dual-wielded weapon.
+local function equipped_weapon_res(inv, slot)
+    local eq = inv:GetEquippedItem(slot)
+    if not eq or eq.Index == 0 then return nil end
+    local item = inv:GetContainerItem(math.floor(eq.Index / 0x100), eq.Index % 0x100)
+    if not item or item.Id == 0 then return nil end
+    local res = AshitaCore:GetResourceManager():GetItemById(item.Id)
+    if not res or not res.Skill or res.Skill == 0 then return nil end
+    if not res.Delay or res.Delay <= 0 then return nil end
+    return res
+end
+
 local function get_main_weapon_delay()
     local ok, delay = pcall(function()
         local inv = AshitaCore:GetMemoryManager():GetInventory()
@@ -198,6 +248,13 @@ local function get_main_weapon_delay()
         end
 
         if not res or not res.Delay or res.Delay == 0 then return nil end
+
+        -- Dual wield: a real weapon in the offhand shortens the attack round.
+        local sub_res = equipped_weapon_res(inv, 1)
+        if sub_res then
+            return (res.Delay + sub_res.Delay) * (1.0 - get_dual_wield_pct()) / 2.0 / 60.0
+        end
+
         return res.Delay / 60.0
     end)
     return ok and delay or nil
