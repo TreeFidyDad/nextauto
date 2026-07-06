@@ -1,6 +1,6 @@
 addon.name    = 'nextauto'
 addon.author  = 'TreeFidyDad'
-addon.version = '2.0.1'
+addon.version = '2.0.2'
 addon.desc    = 'Configurable next-auto-attack swing timer (arc or bar) with color gradient.'
 addon.link    = 'https://github.com/TreeFidyDad/nextauto'
 
@@ -40,13 +40,42 @@ local defaultConfig = T{
 local config = settings.load(defaultConfig)
 
 -- settings.load can leave nested tables shallow; make sure colors are tables.
-local function ensure_color(key, def)
-    if type(config[key]) ~= 'table' then config[key] = T{ def[1], def[2], def[3], def[4] } end
+-- Takes the settings table to normalize so it can be re-run when the profile is
+-- swapped on character login (see settings.register below).
+local function normalize_colors(cfg)
+    local function ensure_color(key, def)
+        if type(cfg[key]) ~= 'table' then cfg[key] = T{ def[1], def[2], def[3], def[4] } end
+    end
+    ensure_color('color_start', defaultConfig.color_start)
+    ensure_color('color_mid',   defaultConfig.color_mid)
+    ensure_color('color_end',   defaultConfig.color_end)
+    ensure_color('bg_color',    defaultConfig.bg_color)
 end
-ensure_color('color_start', defaultConfig.color_start)
-ensure_color('color_mid',   defaultConfig.color_mid)
-ensure_color('color_end',   defaultConfig.color_end)
-ensure_color('bg_color',    defaultConfig.bg_color)
+normalize_colors(config)
+
+-- Load the correct per-character profile automatically on login.
+--
+-- Ashita loads addons at the boot/login screen, before a character is selected,
+-- so the settings.load() above reads the shared "defaults" profile. When you log
+-- in and zone, the settings library swaps in that character's settings table and
+-- raises this event. Without re-pointing `config` at the new table (every other
+-- reference reads this same upvalue live), the addon keeps showing the default
+-- profile until a manual `/addon reload nextauto`. Registering here makes the
+-- character profile load on its own, the way luashitacast swaps profiles on login.
+settings.register('settings', 'nextauto_settings_update', function(s)
+    if s == nil then return end
+    config = s
+    normalize_colors(config)
+
+    -- Announce only when a real character profile is active (login/zone-in), not
+    -- on logout, which reloads the shared defaults profile.
+    local ok, status = pcall(function()
+        return AshitaCore:GetMemoryManager():GetPlayer():GetLoginStatus()
+    end)
+    if ok and status == 2 then
+        print('[NextAuto] Character profile loaded.')
+    end
+end)
 
 -- Curated color presets (/nextauto preset <name>). Start = just swung,
 -- End = swing ready; End is intentionally the most aggressive color.

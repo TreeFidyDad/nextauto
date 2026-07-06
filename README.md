@@ -93,7 +93,9 @@ animation lock (~2.0s by default), then it resumes from exactly where it
 paused — so the bar never drifts ahead of your real swing. When you are not
 engaged it hides (or freezes, your choice).
 
-Settings are saved per-character via Ashita's settings library.
+Settings are saved per-character via Ashita's settings library, and your
+character's profile is loaded automatically as soon as you log in — no
+`/addon reload` needed.
 
 ---
 
