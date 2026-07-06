@@ -90,9 +90,10 @@ the proper H2H delay formula (`480 + weapon_delay - MA_reduction`), so it works
 correctly for all jobs without any other addons.
 
 When you dual wield (NIN/DNC or a `/NIN`, `/DNC` subjob), the attack round is seeded
-from both weapons and the Dual Wield trait — `(main_delay + sub_delay) × (1 − DW%) ÷ 2`
+from both weapons and the Dual Wield trait — `(main_delay + sub_delay) × (1 − DW%)`
 — instead of the main weapon alone, so the timer is close from the first swing and the
-rolling average then dials it in for haste.
+rolling average then dials it in for haste. (That combined value is the attack-round
+interval; BGWiki's `÷ 2` variant is the per-hand delay used for TP, not the round.)
 
 Weaponskills, job abilities, spellcasts, ranged attacks, pet commands, Dancer
 steps, and RUN actions freeze the timer for the duration of the action's

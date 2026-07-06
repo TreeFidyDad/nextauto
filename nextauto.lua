@@ -1,6 +1,6 @@
 addon.name    = 'nextauto'
 addon.author  = 'TreeFidyDad'
-addon.version = '2.0.3'
+addon.version = '2.0.4'
 addon.desc    = 'Configurable next-auto-attack swing timer (arc or bar) with color gradient.'
 addon.link    = 'https://github.com/TreeFidyDad/nextauto'
 
@@ -249,10 +249,14 @@ local function get_main_weapon_delay()
 
         if not res or not res.Delay or res.Delay == 0 then return nil end
 
-        -- Dual wield: a real weapon in the offhand shortens the attack round.
+        -- Dual wield: a real weapon in the offhand changes the attack round.
+        -- The attack-round interval (time between rounds, both hands swinging)
+        -- is (D_main + D_sub) * (1 - DW%). BGWiki's "(D1+D2)*(1-DW)/2" is the
+        -- per-hand delay used for TP; the round itself is twice that, so there
+        -- is no /2 here.
         local sub_res = equipped_weapon_res(inv, 1)
         if sub_res then
-            return (res.Delay + sub_res.Delay) * (1.0 - get_dual_wield_pct()) / 2.0 / 60.0
+            return (res.Delay + sub_res.Delay) * (1.0 - get_dual_wield_pct()) / 60.0
         end
 
         return res.Delay / 60.0
