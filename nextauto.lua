@@ -1,6 +1,6 @@
 addon.name    = 'nextauto'
 addon.author  = 'TreeFidyDad'
-addon.version = '2.0.4'
+addon.version = '2.0.5'
 addon.desc    = 'Configurable next-auto-attack swing timer (arc or bar) with color gradient.'
 addon.link    = 'https://github.com/TreeFidyDad/nextauto'
 
@@ -66,6 +66,7 @@ settings.register('settings', 'nextauto_settings_update', function(s)
     if s == nil then return end
     config = s
     normalize_colors(config)
+    settings.save()
 
     -- Announce only when a real character profile is active (login/zone-in), not
     -- on logout, which reloads the shared defaults profile.
